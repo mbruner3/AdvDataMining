@@ -1,0 +1,392 @@
+---
+title: "Safe Babies Car Seat Price Optimization"
+author: "Mark Bruner"
+course: "64011: Advanced Data Mining"
+date: "March 21, 2021"
+output: 
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+```
+
+### Loading libraries needed for project
+```{r}
+library(tidyverse)
+library(glmnet)
+library(corrplot)
+library(ISLR)
+```
+
+### Loading Carseats dataset
+```{r}
+safe_babies <- Carseats %>%  
+  select("Sales", "Price", "ShelveLoc")
+
+  # Creating profit column for future visualizations. 
+  # Equation for profit: (price - cost) * (quantity of sales)
+safe_babies$profit <- (safe_babies$Price - 55) * safe_babies$Sales 
+```
+
+# **Part 1: Exploratory Data Analysis**
+
+## **Univariate Analysis**
+```{r}
+summary(safe_babies)
+```
+
+### Measures of Central Tendancy and Dispersion
+All columns have means and medians fairly close together, which means that they are more normally distributed. The 1st and 3rd quartiles are mostly symmetrical around the mean/median. The "ShelveLoc" column's category "Medium" is where over 50% of the carseats are located.
+
+
+```{r}
+safe_babies %>%
+  filter(ShelveLoc == "Good") %>% 
+  keep(is.numeric) %>%                     # Keep only numeric columns
+  gather() %>%                             # Convert to key-value pairs
+  ggplot(aes(value)) + # Plot the values
+    facet_wrap(~ key, scales = "free") +   # In separate panels
+    geom_histogram(bins = 30)
+```
+
+### Histograms of Carseats in Good Shelf locations
+From these plots, it confirms that the columns of profit and price are normally distributed. The sales column is more skewed to the right. I don't see any outliers that are mistakes. The prices are all positive as well as the sales which make sense. The profit has a negative value but profit can be negative if the price of carseat is less than the cost of production so that doesn't seem unrealistic.
+
+
+```{r}
+safe_babies %>%
+  filter(ShelveLoc == "Bad") %>% 
+  keep(is.numeric) %>%                     # Keep only numeric columns
+  gather() %>%                             # Convert to key-value pairs
+  ggplot(aes(value)) + # Plot the values
+    facet_wrap(~ key, scales = "free") +   # In separate panels
+    geom_histogram(bins = 30) 
+```
+
+### Histograms of Carseats in Bad Shelf locations
+From these plots, it confirms that the columns are more normally distributed. The price column seems to have an outlier that is more extreme but since the dataset if fairly small, 1 price that is outside the norm is worth looking into but it doesn't seem too extreme. 
+
+## **Bivariate Analysis**
+```{r}
+safe_babies %>% 
+  ggplot(aes(Sales, Price, color = ShelveLoc))+
+  geom_point()
+```
+
+### Relationship Between Sales & Price
+Their is a negative relationship between sales and price, which is what you would expect. As price increases, sales decrease and visa versa. You would also expect carseats placed in a good shelf location would have, on average, higher sales. The lower the shelf location the lower the sales. You can see that the green dots (representing good shelf location), have mostly higher sales compared to the other locations. 
+
+### Outliers and Data Spread by Shelf Location
+```{r}
+safe_babies %>% 
+  ggplot(aes(Sales, ShelveLoc, color = ShelveLoc))+
+  geom_boxplot()
+```
+
+```{r}
+safe_babies %>% 
+  ggplot(aes(Price, ShelveLoc, color = ShelveLoc))+
+  geom_boxplot()
+```
+
+### Boxplot Analysis
+Most of the outliers were in the medium shelf location and the better the shelf location the better the sales, on average. The other interesting relationship was that the price spread for both medium and good shelf locations were almost identical. 
+
+```{r}
+# Looking at the outliers that the boxplots to check for errors.
+safe_babies %>% 
+  filter(Price < 60| Price > 175 | Sales < .2) %>% 
+  arrange(Price)
+```
+
+I don't see any mistakes. The negative profit is associated with those with prices below the $55 cost which is to be expected. The others with high prices have low sales which again makes sense.
+
+### **Multivariate Analysis**
+```{r}
+# One hot encoding the shelf location to keep them in the glm.
+safe_babies_mx <- model.matrix( ~ .-1, safe_babies[,1:4])
+
+# Separating the sales variable from the other variables. Will check to see if the predictors are independent of one another.
+x = safe_babies_mx[, 2:5]
+y = safe_babies_mx[, 1]
+
+safebabies_cor <- cor(safe_babies_mx)
+
+corrplot(safebabies_cor, method = "shade", type = "upper")
+```
+
+The price, good and bad shelf locations are all fairly uncorrelated. The good and bad shelf locations have a slight negative correlation of .29 but shouldn't be too much of a problem. Medium is highly negatively correlated with good and bad.
+
+# **Part 2: Model Building**
+
+### Optimal GLM model for Sales & Price Based on Location
+
+```{r}
+# Using 20 fold cross-validation to find the optimal glm model for our dataset.
+for (a in seq(0,1,by=0.1)) {
+cv.fit <- cv.glmnet(x, y, alpha = a, nfolds = 20)
+print(paste0("alpha is ", a, " and best MSE is " , min(cv.fit$cvm)))
+}
+```
+
+It looks like the alpha value at .6 is optimal.
+
+```{r}
+# The Best Fit Model for This Dataset
+best_fit <- coef(cv.fit, s = "lambda.min")
+best_fit
+```
+
+Using the best fitted model from above to model the relationship between sales and price + shelf location. You will notice that Medium shelf location was eliminated from this model.
+
+# **Part 3: Optimal Price for $55 Cost** 
+
+```{r}
+# Created a function to find the optimal value based on shelf location.
+# cost is the cost of carseat production, good and bad represent shelf location and they are binary.
+optimal <- function(cost, good, bad) {
+  # Derivative of the first term in the quadratic profit equation 
+  x1 <- 2*best_fit[2] 
+  
+  #Derivative of the second term in the profit equation
+   x2 <- -1*best_fit[1] + 
+     -1*best_fit[3] * bad + 
+     -1*best_fit[4] * good + 
+     (best_fit[2]*cost)
+   
+  #Solving the derivative for max price unknown 
+   optimal_price <- x2/x1
+   
+   optimal_sales <- best_fit[1] + best_fit[3] * bad + best_fit[4]*good + best_fit[2]*optimal_price
+   
+   optimal_profit <- (optimal_price - cost) * optimal_sales
+   return(as.data.frame(cbind("price" = round(optimal_price, 2), 
+                              "sales" = round(optimal_sales, 2),
+                              "profit" = round(optimal_profit, 2))))
+}
+```
+
+### Optimal Price, Sales, and Profit for Good Shelf Location
+
+```{r}
+optimal(55, 1, 0)
+```
+
+Optimal price for a $55 cost is $176.98 or $177. Optimal sales is 6.87 thousand carseats which will provide $837.95 thousand dollar profit.
+
+```{r}
+price <- as.data.frame(seq(1,300, by = 1))
+price <- price %>% 
+  rename(seq_price = "seq(1, 300, by = 1)")
+bad <- 0
+good <- 1
+cost <- 55
+# Derivative of the first term in the quadratic profit equation 
+  x1 <- 2*best_fit[2] 
+  
+  #Derivative of the second term in the profit equation
+   x2 <- -1*best_fit[1] + 
+     -1*best_fit[3] * bad + 
+     -1*best_fit[4] * good + 
+     (best_fit[2]*cost)
+
+derivative <- -1*x1*price + -1*x2 # derivative of the quadratic equation.
+
+  #Solving the derivative for max price unknown 
+   optimal_price <- x2/x1
+   
+   optimal_sales <- best_fit[1] + best_fit[3] * bad + best_fit[4]*good + best_fit[2]*optimal_price
+   
+   optimal_profit <- (optimal_price - cost) * optimal_sales
+   
+   opt_price = as.data.frame(cbind(price, "good_sales" = optimal_sales, "good_profit" = optimal_profit, "D" = derivative))
+   
+   opt_price %>% 
+     rename(opt_price$`seq(1, 300, by = 1)`)
+```
+
+
+```{r}
+good_safe_babies <- safe_babies %>% 
+                      filter(ShelveLoc == "Good")
+
+ggplot()+
+  geom_line(data = good_safe_babies, 
+            mapping = aes(x = price, y = predicts), 
+            colour = "deepskyblue4",
+            size = 1)+
+  geom_line(data = opt_price,
+            mapping = aes(x = price, y = D)) +
+  geom_point(data = good_safe_babies, 
+             mapping = aes(x = Price, y = profit), 
+             colour = "gainsboro") +
+  geom_hline(yintercept = max(good_profit), 
+             color = "dimgray", 
+             linetype = "dashed")+
+  geom_vline(xintercept = optimal_price,
+             color = "dimgray",
+             linetype = "dashed")+ 
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab("Profit from Shelve Location: Good") +
+  xlab("Price")
+```
+
+
+```{r}
+# Creating 
+costs <- as.data.frame(seq(40, 85, by = 5))
+costs <- costs %>% 
+          rename('costs'=`seq(40, 85, by = 5)`)
+```
+
+
+```{r}
+for(i in costs) {
+  # i-th element of `costs` used to find good shelf optimal sales, price, and profit
+  good_results <- as.data.frame(optimal(i, 1, 0))
+  good_results <- (cbind(costs, good_results))
+  print(good_results)
+}
+
+for(i in costs) {
+  # i-th element of `costs` used to find bad shelf optimal sales, price, and profit
+  bad_results <- as.data.frame(optimal(i, 0, 1))
+  bad_results <- (cbind(costs, bad_results))
+  print(bad_results)
+}
+
+```
+
+```{r}
+good_results %>% 
+  ggplot(mapping = aes(x = price, y = sales)) +
+  geom_point()
+```
+
+
+
+```{r}
+
+good_sales = 13.81886875 + 3.01656617 * good - 0.05630956 * price - 1.84666135 * bad 
+x1 = -0.05630956 * 2
+x2 = -13.81886875 - 3.01656617 - (55*0.05630956)
+optimal_price = x2/x1
+optimal_sales = 13.81886875 + 3.01656617 - 0.05630956 * optimal_price
+optimal_unit_profit = optimal_price - cost
+optimal_profit = optimal_unit_profit * optimal_sales
+good_profit = -0.05630956 * price^2 + 19.93246072 * price - 925.94891785
+opt_price = as.data.frame(cbind(price = price, good_sales = good_sales, good_profit = good_profit, D = derivative))
+```
+
+
+```{r}
+
+
+ggplot()+
+  geom_line(data = opt_price, 
+            mapping = aes(x = good_sales, y = good_profit), 
+            colour = "red")+
+  geom_point(data = good_safe_babies, 
+             mapping = aes(x = Sales, y = profit), 
+             colour = "blue") +
+  geom_hline(yintercept = max(good_profit), color = "green")+
+  geom_vline(xintercept = 6.8)+ 
+  theme_minimal() +
+  ylab("Profit from Shelve Location: Good") +
+  xlab("Sales")
+```
+
+```{r}
+good = 0
+bad = 1
+bad_sales = 13.81886875 - 0.05630956 * price - 1.84666135 * bad  + 3.01656617 * good
+bad_profit = ((price - cost)*bad_sales)
+opt_price <- cbind(opt_price, bad_sales = bad_sales, bad_profit = bad_profit)
+max(opt_price$good_profit)
+```
+
+
+```{r}
+bad_safe_babies <- safe_babies %>% 
+                      filter(ShelveLoc == "Bad")
+
+ggplot()+
+  geom_line(data = opt_price, 
+            mapping = aes(x = price, y = bad_profit), 
+            colour = "firebrick",
+            size = 1)+
+  geom_point(data = bad_safe_babies, 
+             mapping = aes(x = Price, y = profit), 
+             colour = "steelblue") +
+  geom_hline(yintercept = max(bad_profit), color = "forestgreen", linetype = "dashed")+
+  geom_vline(xintercept = 135, linetype = "dashed") + 
+  theme_minimal() +
+  ylab("Profit from Shelve Location: Bad") +
+  xlab("Price")
+
+
+ggplot()+
+  geom_line(data = opt_price, 
+            mapping = aes(x = bad_sales, y = bad_profit), 
+            colour = "red")+
+  geom_point(data = bad_safe_babies, 
+             mapping = aes(x = Sales, y = profit), 
+             colour = "blue") +
+  geom_hline(yintercept = max(bad_profit), color = "green")+
+  geom_vline(xintercept = 4.37) + 
+  theme_minimal() +
+  ylab("Profit from Shelve Location: Bad") +
+  xlab("Sales")
+```
+
+
+
+```{r}
+quadraticRoots <- function(a, b, c) {
+
+  print(paste0("You have chosen the quadratic equation ", a, "x^2 + ", b, "x + ", c, "."))
+
+  discriminant <- (b^2) - (4*a*c)
+
+  if(discriminant < 0) {
+    return(paste0("This quadratic equation has no real numbered roots."))
+  }
+  else if(discriminant > 0) {
+    x_int_plus <- (-b + sqrt(discriminant)) / (2*a)
+    x_int_neg <- (-b - sqrt(discriminant)) / (2*a)
+
+    return(paste0("The two x-intercepts for the quadratic equation are ",
+                  format(round(x_int_plus, 5), nsmall = 5), " and ",
+                  format(round(x_int_neg, 5), nsmall = 5), "."))
+  }
+  else #discriminant = 0  case
+    x_int <- (-b) / (2*a)
+    return(paste0("The quadratic equation has only one root. This root is ",
+                  x_int))
+}
+
+quadraticRoots(-0.06, 20.14, -926.2)
+
+f = expression(2.9602566 * x^2 + 13.81886875 * x - 1598.0031359756)
+D(f, "x")
+```
+
+
+```{r}
+price = seq.int(0, 300, len = 300)
+cost = 55
+good = 0
+bad = 1
+quantity = 13.81886875 - 0.05630956 * price - 1.84666135 * bad  + 3.01656617 * good
+profit = (price - cost) * quantity
+plot(profit)
+bad_profit = max(profit)
+bad_profit
+```
+
